@@ -434,6 +434,12 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                 inherit_parent_priority else None
             push_request(task_request)
             try:
+                # Check if we're using a claim check pattern, in which case get the real 
+                # args and kwargs of the task from the backend
+                claim_result_id = kwargs.get("CELERY_USE_CLAIM_CHECK")
+                if claim_result_id:
+                    stored_result = task.backend.get_result(claim_result_id)
+
                 # -*- PRE -*-
                 if prerun_receivers:
                     send_prerun(sender=task, task_id=uuid, task=task,
@@ -451,6 +457,8 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                         task_before_start(uuid, args, kwargs)
 
                     R = retval = fun(*args, **kwargs)
+                    if publish_result:
+                        R = {"CELERY_USE_CLAIM_CHECK": uuid}
                     state = SUCCESS
                 except Reject as exc:
                     I, R = Info(REJECTED, exc), ExceptionInfo(internal=True)
@@ -492,19 +500,19 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                                         sigs.append(sig)
                                 for group_ in groups:
                                     group_.apply_async(
-                                        (retval,),
+                                        (R,),
                                         parent_id=uuid, root_id=root_id,
                                         priority=task_priority
                                     )
                                 if sigs:
                                     group(sigs, app=app).apply_async(
-                                        (retval,),
+                                        (R,),
                                         parent_id=uuid, root_id=root_id,
                                         priority=task_priority
                                     )
                             else:
                                 signature(callbacks[0], app=app).apply_async(
-                                    (retval,), parent_id=uuid, root_id=root_id,
+                                    (R,), parent_id=uuid, root_id=root_id,
                                     priority=task_priority
                                 )
 
@@ -513,7 +521,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                         if chain:
                             _chsig = signature(chain.pop(), app=app)
                             _chsig.apply_async(
-                                (retval,), chain=chain,
+                                (R,), chain=chain,
                                 parent_id=uuid, root_id=root_id,
                                 priority=task_priority
                             )
@@ -548,6 +556,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
             finally:
                 try:
                     if postrun_receivers:
+                        # TODO: Should this also use the result claim only
                         send_postrun(sender=task, task_id=uuid, task=task,
                                      args=args, kwargs=kwargs,
                                      retval=retval, state=state)
